@@ -70,6 +70,13 @@ define the curved cuts; boolean intersections preserve the original exterior.
 The interfaces share their triangulation and do not cross. Source overhangs are
 reported; they do not imply that the glue interfaces interlock.
 
+If the first direction produces disconnected layers, automatic selection tries
+other axes and tilted directions. It keeps the first split that passes all output
+checks, recording rejected attempts in `report.json`. It never drops disconnected
+fragments to force a successful export. An explicit `--direction` is respected
+without fallback. This is a finite search, so failure does not prove that every
+possible cutting direction is unsuitable.
+
 - `--pitch 0.8`: maximum grid spacing in mm. Smaller values resolve more curvature,
   at greater time and memory cost. Compare outputs at half the pitch for convergence.
 - `--direction X,Y,Z`: explicitly choose an insertion direction in input coordinates.

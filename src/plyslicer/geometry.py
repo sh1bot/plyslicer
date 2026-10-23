@@ -10,6 +10,10 @@ class GeometryError(ValueError):
     pass
 
 
+class DisconnectedLayerError(GeometryError):
+    """A valid solid cannot be laminated in the current direction."""
+
+
 @dataclass
 class Frame:
     origin: np.ndarray
@@ -150,6 +154,52 @@ def slab(xy, bottom, top):
 
 def split_model(mesh, layers=2, pitch=.8, direction=None, min_thickness=.4,
                 pins=0, pin_diameter=2., clearance=.15):
+    options = dict(layers=layers, pitch=pitch, min_thickness=min_thickness,
+                   pins=pins, pin_diameter=pin_diameter, clearance=clearance)
+    try:
+        return _split_model(mesh, direction=direction, **options)
+    except DisconnectedLayerError as first_error:
+        if direction is not None:
+            raise
+        first_message = str(first_error)
+    # A broad projection alone does not imply a connected lamination. Explore
+    # tilted insertion directions, keeping every component and all validation.
+    # World diagonals help models imported in a different print orientation;
+    # PCA diagonals make the search useful independent of that orientation.
+    primary, _ = choose_frame(mesh)
+    _, axes = np.linalg.eigh(np.cov(mesh.vertices.T))
+    directions = [*axes.T, *np.eye(3)]
+    for basis in (axes, np.eye(3)):
+        for i in range(3):
+            for j in range(i + 1, 3):
+                for sign in (-1, 1):
+                    directions.append(basis[:, i] + sign * basis[:, j])
+    candidates = []
+    for d in directions:
+        frame = make_frame(mesh, d)
+        if abs(frame.basis[:, 2] @ primary.basis[:, 2]) > .99999:
+            continue
+        if not any(abs(frame.basis[:, 2] @ f.basis[:, 2]) > .99999 for f in candidates):
+            candidates.append(frame)
+    candidates.sort(key=lambda f: float(np.abs(mesh.face_normals @ f.basis[:, 2]) @ mesh.area_faces), reverse=True)
+    attempts = [{'direction': primary.basis[:, 2].tolist(), 'error': first_message}]
+    for frame in candidates:
+        d = frame.basis[:, 2]
+        try:
+            parts, report = _split_model(mesh, direction=d, **options)
+        except GeometryError as exc:
+            attempts.append({'direction': d.tolist(), 'error': str(exc)})
+            continue
+        report['automatic_direction_failures'] = attempts
+        report['warnings'].append(f'Used a fallback insertion direction after {len(attempts)} rejected splits.')
+        return parts, report
+    raise GeometryError('Automatic direction search found no valid connected split. '
+                        'Try --direction X,Y,Z or a finer --pitch. '
+                        f'First failure: {first_message}')
+
+
+def _split_model(mesh, layers=2, pitch=.8, direction=None, min_thickness=.4,
+                 pins=0, pin_diameter=2., clearance=.15):
     if layers < 2 or layers > 32:
         raise GeometryError("--layers must be between 2 and 32.")
     if not all(np.isfinite(v) and v > 0 for v in [pitch, min_thickness, pin_diameter]):
@@ -177,7 +227,7 @@ def split_model(mesh, layers=2, pitch=.8, direction=None, min_thickness=.4,
         if part.is_empty or not part.is_watertight or part.volume <= 0:
             raise GeometryError(f"Layer {k + 1} did not produce a closed solid; try a smaller --pitch.")
         if len(part.split()) != 1:
-            raise GeometryError(f"Layer {k + 1} is disconnected; use fewer layers or a smaller --pitch.")
+            raise DisconnectedLayerError(f"Layer {k + 1} is disconnected; try another --direction, fewer layers, or a smaller --pitch.")
         parts.append(part)
     uncut_volume = sum(p.volume for p in parts)
     if abs(uncut_volume - local.volume) > local.volume * 1e-4:

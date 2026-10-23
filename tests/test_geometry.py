@@ -5,7 +5,8 @@ import pytest
 import trimesh
 
 from plyslicer.cli import main
-from plyslicer.geometry import GeometryError, load_model, make_frame, projection_check, slab, split_model
+from plyslicer.geometry import (DisconnectedLayerError, GeometryError, load_model,
+                                make_frame, projection_check, slab, split_model)
 
 
 def curved_shell():
@@ -60,6 +61,29 @@ def test_alignment_bores_remove_material_and_keep_closed_parts():
     assert len(report['alignment']['bore_centers_local_xy_mm']) == 2
     assert 0 < sum(p.volume for p in parts) < mesh.volume
     assert all(p.is_watertight for p in parts)
+
+
+def test_automatic_direction_recovers_from_disconnected_laminations():
+    # A channel's broadest direction separates the two lips into islands.
+    # A different insertion direction can laminate it without losing either lip.
+    boxes = []
+    for size, position in [([60, 10, 2], [0, 0, -9]),
+                           ([60, 10, 2], [0, 0, 9]),
+                           ([60, 2, 20], [0, -4, 0])]:
+        box = trimesh.creation.box(size)
+        box.apply_translation(position)
+        boxes.append(box)
+    mesh = trimesh.boolean.union(boxes, engine='manifold')
+    with pytest.raises(DisconnectedLayerError):
+        split_model(mesh, direction=[0, 1, 0], pitch=1)
+    parts, report = split_model(mesh, pitch=1)
+    assert report['automatic_direction_failures']
+    assert all(p.is_watertight and len(p.split()) == 1 for p in parts)
+    assert sum(p.volume for p in parts) == pytest.approx(mesh.volume, rel=1e-5)
+    shifted = parts[1].copy()
+    shifted.apply_translation(np.array(report['insertion_direction_world']) * .25)
+    overlap = trimesh.boolean.intersection([parts[0], shifted], engine='manifold')
+    assert overlap.is_empty or overlap.volume < 1e-5
 
 
 def test_cli_exports_and_refuses_overwrite(tmp_path):
